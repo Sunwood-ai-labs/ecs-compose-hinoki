@@ -1,0 +1,97 @@
+name: CD
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      ecr_repository: ${{ steps.terraform-output.outputs.ecr_repository_url }}
+      ecs_cluster: ${{ steps.terraform-output.outputs.ecs_cluster_name }}
+      ecs_service: ${{ steps.terraform-output.outputs.ecs_service_name }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ap-northeast-1
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.6.0"
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: |
+        terraform init \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+          -backend-config="region=ap-northeast-1"
+
+    - name: Terraform Plan
+      working-directory: ./terraform
+      run: terraform plan -input=false
+
+    - name: Terraform Apply
+      working-directory: ./terraform
+      run: terraform apply -auto-approve -input=false
+
+    - name: Get Terraform Outputs
+      id: terraform-output
+      working-directory: ./terraform
+      run: |
+        echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+        echo "ecs_cluster_name=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
+        echo "ecs_service_name=$(terraform output -raw ecs_service_name)" >> $GITHUB_OUTPUT
+
+  deploy-application:
+    needs: deploy-infrastructure
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ap-northeast-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build and push image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker-compose build
+        docker-compose push
+
+    - name: Deploy to ECS
+      run: |
+        aws ecs update-service \
+          --cluster ${{ needs.deploy-infrastructure.outputs.ecs_cluster }} \
+          --service ${{ needs.deploy-infrastructure.outputs.ecs_service }} \
+          --force-new-deployment
+
+    - name: Wait for deployment
+      run: |
+        aws ecs wait services-stable \
+          --cluster ${{ needs.deploy-infrastructure.outputs.ecs_cluster }} \
+          --services ${{ needs.deploy-infrastructure.outputs.ecs_service }}

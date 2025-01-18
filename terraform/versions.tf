@@ -9,8 +9,8 @@ terraform {
   }
 
   backend "s3" {
-    # バックエンドの設定は環境ごとに異なるため、
-    # terraform initコマンド実行時に-backend-config引数で指定することを推奨
-    key = "terraform.tfstate"
+    bucket = "ecs-compose-hinoki-terraform-state"
+    key    = "terraform.tfstate"
+    region = "ap-northeast-1"
   }
 }
